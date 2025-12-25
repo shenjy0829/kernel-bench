@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Kernel Bench Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link rel="stylesheet" href="assets/style.css"/>
+</head>
+<body>
+<header>
+  <h1>GPU Kernel Performance</h1>
+  <p>Generated on <span id="date"></span></p>
+</header>
+
+<div class="grid">
+  <div class="card"><div id="tflops"></div></div>
+  <div class="card"><div id="bandwidth"></div></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<script>
+fetch('results/result.json')
+  .then(r => r.json())
+  .then(draw);
+
+function draw(data) {
+  const tflopsOps = {
+    backgroundColor:'transparent',
+    title:{text:'TFLOPS',left:'center',textStyle:{fontSize:16,color:'#ddd'}},
+    tooltip:{trigger:'axis',formatter:'{b}: {c}'},
+    xAxis:{type:'category',data:data.map(d=>d.impl),axisLine:{lineStyle:{color:'#666'}}},
+    yAxis:{type:'value',name:'TFLOPS',axisLine:{lineStyle:{color:'#666'}}},
+    series:[{type:'bar',data:data.map(d=>d.tflops),itemStyle:{color:'#61d961'}}]
+  };
+  const bwOps = {
+    ...tflopsOps, title:{text:'Memory Bandwidth (GB/s)',left:'center',textStyle:{fontSize:16,color:'#ddd'}},
+    yAxis:{name:'GB/s'}, series:[{data:data.map(d=>d.bw),itemStyle:{color:'#fac858'}}]
+  };
+  echarts.init(document.getElementById('tflops')).setOption(tflopsOps);
+  echarts.init(document.getElementById('bandwidth')).setOption(bwOps);
+  document.getElementById('date').textContent = new Date().toLocaleString();
+}
+</script>
+</body>
+</html>

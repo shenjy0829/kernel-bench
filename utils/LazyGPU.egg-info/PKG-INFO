@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: LazyGPU
+Version: 1.0
+Summary: A lazy GPU kernel benchmark framework
+Author: fish
+Dynamic: author
+Dynamic: summary
