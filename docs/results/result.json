@@ -1,5 +1,0 @@
-[
-  {"impl":"CUDA GEMM","tflops":83.2,"bw":1050},
-  {"impl":"Triton GEMM","tflops":78.5,"bw":990},
-  {"impl":"TileLang GEMM","tflops":81.9,"bw":1020}
-]

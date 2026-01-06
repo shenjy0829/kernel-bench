@@ -47,6 +47,8 @@ pip install nvidia-cutlass-dsl
 
 ## else
 mamba install colorama
+mamba install loguru plotly pandas click
+
 
 ## install LazyGPU
 cd utils
