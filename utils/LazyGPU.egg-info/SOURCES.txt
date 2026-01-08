@@ -1,8 +1,0 @@
-setup.py
-LazyGPU/LazyGPU.py
-LazyGPU/__init__.py
-LazyGPU/check_env.py
-LazyGPU.egg-info/PKG-INFO
-LazyGPU.egg-info/SOURCES.txt
-LazyGPU.egg-info/dependency_links.txt
-LazyGPU.egg-info/top_level.txt

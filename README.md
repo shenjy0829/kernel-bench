@@ -61,7 +61,7 @@ pip install -e .
 
 + NVIDIA A100-SXM4-40GB
 
-
++ NVIDIA 5080
 
 # References
 The implementation of this benchmark has benefited from the following sources:
