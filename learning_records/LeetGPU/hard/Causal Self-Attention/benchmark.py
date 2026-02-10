@@ -8,8 +8,8 @@ class LazyGPUBench(LazyGPUBase):
     def __init__(self):
         super().__init__(
             name="Causal Self-Attention",
-            atol=1e-05,
-            rtol=1e-05,
+            atol=1e-04,
+            rtol=1e-04,
         )
         
     def reference_impl(

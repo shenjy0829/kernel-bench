@@ -9,64 +9,83 @@ def mha_kernel(
     BLOCKSIZE_N: tl.constexpr, 
     BLOCKSIZE_d: tl.constexpr
 ):
-    pid0 = tl.program_id(0)
-    pid1 = tl.program_id(1)
-
-    offset = tl.arange(0, BLOCKSIZE_N)
+    pid0 = tl.program_id(0)             # query block index
+    pid1 = tl.program_id(1)             # head index
+    offs_n = tl.arange(0, BLOCKSIZE_N)
+    offs_d = tl.arange(0, BLOCKSIZE_d)
 
     d_head = d_model // h
 
-    offset_N = pid0 * BLOCKSIZE_N + offset
-    offset_d = pid1 * d_head + tl.arange(0, BLOCKSIZE_d)
+    # load Q block
+    offsets_n = pid0 * BLOCKSIZE_N + offs_n[:, None]
+    offsets_dim_head = pid1 * d_head + offs_d[None, :]
+    mask_q_n = offsets_n < N
+    mask_dim_head = offs_d < d_head
 
-    mask_d = tl.arange(0, BLOCKSIZE_d) < d_head
+    offsets_block = offsets_n * d_model + offsets_dim_head
+    mask_block = mask_q_n & mask_dim_head
 
-    offset_Q = offset_N[:, None] * d_model + offset_d[None, :]
-    mask_Q = (offset_N[:, None] < N) & mask_d[None, :]
+    block_q = tl.load(
+        Q_ptr + offsets_block,
+        mask = mask_block,
+        other = 0.0
+    ) # [BLOCKSIZE_N, BLOCKSIZE_d]
 
-    data_Q = tl.load(Q_ptr + offset_Q, mask=mask_Q)
-
+    # online para
     attention_logit_scale = 1.0 / tl.sqrt(d_head + 0.0)
+    online_softmax_running_sum = tl.zeros([BLOCKSIZE_N], dtype=tl.float32)                  # store running sum of softmax(score)
+    online_softmax_current_max = tl.full([BLOCKSIZE_N], float("-inf"), dtype=tl.float32)    # store running max of softmax(score)
+    online_accumulator = tl.zeros((BLOCKSIZE_N, BLOCKSIZE_d), dtype=tl.float32)             # store running softmax(score) @ V
 
-    accumulator = tl.zeros((BLOCKSIZE_N, BLOCKSIZE_d), dtype=tl.float32)
-    softmax_running_sum = tl.zeros([BLOCKSIZE_N], dtype=tl.float32)
-    softmax_current_max = tl.full([BLOCKSIZE_N], float("-inf"), dtype=tl.float32)
+    # loop over N dimensions of K, V
+    for start_n in range(0, N, BLOCKSIZE_N):
+        offsets_k_n = start_n + offs_n[:, None]
+        mask_k_n = offsets_k_n < N
 
-    for current_index in range(0, N, BLOCKSIZE_N):
-        current_N_offset = current_index + offset
-        current_N_mask = current_N_offset < N
+        offsets_k = offsets_k_n * d_model + offsets_dim_head
+        mask_k = mask_k_n & mask_dim_head
 
-        offset_K = current_N_offset[:, None] * d_model + offset_d[None, :]
-        mask_K = current_N_mask[:, None] & mask_d[None, :]
+        block_k = tl.load(
+            K_ptr + offsets_k,
+            mask = mask_k,
+            other = 0.0
+        ) # [BLOCKSIZE_N, BLOCKSIZE_d]
 
-        data_K = tl.load(K_ptr + offset_K, mask=mask_K, other=0.0)
+        offsets_v = offsets_k_n * d_model + offsets_dim_head
+        mask_v = mask_k_n & mask_dim_head
 
-        offset_V = current_N_offset[:, None] * d_model + offset_d[None, :]
-        mask_V = current_N_mask[:, None] & mask_d[None, :]
+        block_v = tl.load(
+            V_ptr + offsets_v,
+            mask = mask_v,
+            other = 0.0
+        ) # [BLOCKSIZE_N, BLOCKSIZE_d]
 
-        data_V = tl.load(V_ptr + offset_V, mask=mask_V, other=0.0)
+        # Compute attention scores
+        block_attn_scores = tl.dot(block_q, tl.trans(block_k)) * attention_logit_scale          # [BLOCKSIZE_N, BLOCKSIZE_N]
+        block_attn_scores_mask = mask_q_n & (start_n + tl.arange(0, BLOCKSIZE_N)[None, :] < N)  # 注意这里结果的 mask 和 mask_k_n 不一样
+        block_attn_scores = tl.where(block_attn_scores_mask, block_attn_scores, float("-inf"))
 
-        attention_logits = tl.dot(data_Q, tl.trans(data_K)) * attention_logit_scale
-        attention_logits_mask = (offset_N[:, None] < N) & (current_N_offset[None, :] < N)
-        attention_logits = tl.where(attention_logits_mask, attention_logits, float("-inf"))
+        # Online softmax
+        current_max = tl.max(block_attn_scores, axis=1)                 # [BLOCKSIZE_N]
+        new_max = tl.maximum(online_softmax_current_max, current_max)
+        exp_diff_prev = tl.exp(online_softmax_current_max - new_max) 
+        online_softmax_current_max = new_max  # [BLOCKSIZE_N] 
 
-        current_block_max = tl.max(attention_logits, axis=1)
-        max_value = tl.maximum(current_block_max, softmax_current_max)
+        block_attn_scores_shifted = block_attn_scores - new_max[:, None]  # [BLOCKSIZE_N, BLOCKSIZE_N]
+        block_attn_scores_shifted_exp = tl.exp(block_attn_scores_shifted)  # [BLOCKSIZE_N, BLOCKSIZE_N]
+        online_softmax_running_sum = tl.fma(online_softmax_running_sum, exp_diff_prev, tl.sum(block_attn_scores_shifted_exp, axis=1))  # [BLOCKSIZE_N]
+        
+        online_accumulator = tl.fma(online_accumulator, exp_diff_prev[:, None], tl.dot(block_attn_scores_shifted_exp, block_v))          # [BLOCKSIZE_N, BLOCKSIZE_d]
 
-        softmax_scaler = tl.exp(softmax_current_max - max_value)
-        softmax_current_max = max_value
+    # div online_accumulator by online_softmax_running_sum
+    online_accumulator = online_accumulator / online_softmax_running_sum[:, None]
 
-        attention_logits_shift = attention_logits - max_value[:, None]
-
-        softmax_nom = tl.exp(attention_logits_shift)
-        softmax_denom = tl.sum(softmax_nom, axis=1)
-
-        softmax_running_sum = tl.fma(softmax_running_sum, softmax_scaler, softmax_denom)
-        accumulator = tl.fma(accumulator, softmax_scaler[:, None], tl.dot(softmax_nom, data_V))
-
-    accumulator = accumulator / softmax_running_sum[:, None]
-
-    tl.store(output_ptr + offset_Q, accumulator, mask=mask_Q)
+    # store ouput     
+    tl.store(
+        output_ptr + offsets_block,
+        online_accumulator,
+        mask = mask_block
+    )
 
 # Q, K, V, output are tensors on the GPU
 def solve(
@@ -75,7 +94,7 @@ def solve(
     V: torch.Tensor,        # [N, d_model]
     output: torch.Tensor,
     N: int,
-    d_model: int,
+    d_model: int,           # d_head * h 
     h: int,
 ):
     # Q K V [N, d_head, h] --> [h, N, d_head]
@@ -84,9 +103,11 @@ def solve(
     # Softmax @ V [h, N, d_head] --> [N, d_model]
     
     BLOCKSIZE_N = 32
-    BLOCKSIZE_d = max(16, d_model // h) 
+    BLOCKSIZE_d = max(16, d_model // h) # BLOCKSIZE_d >= d_head
 
     grid = (triton.cdiv(N, BLOCKSIZE_N), h)
+    # each block process [BLOCKSIZE_N, BLOCKSIZE_d] 事实上就是 [BLOCKSIZE_N, 1个head] 
+    # BLOCKSIZE_d 是为了适配 triton 的 vector load/store
     mha_kernel[grid](Q, K, V, output,
                      N, d_model, h,
                      BLOCKSIZE_N, BLOCKSIZE_d,
